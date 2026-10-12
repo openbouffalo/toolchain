@@ -1,0 +1,132 @@
+name: Build Xuantie GNU Toolchain
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Toolchain version to build (e.g., V3.0.1)"
+        required: true
+        default: "V3.0.1"
+
+env:
+  TOOLCHAIN_VERSION: ${{ github.event.inputs.version  }}
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runs-on: ubuntu-latest
+            artifact-name: toolchain-x86_64
+          - arch: aarch64
+            runs-on: ubuntu-24.04-arm
+            artifact-name: toolchain-aarch64
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            gawk \
+            bison \
+            flex \
+            texinfo \
+            libgmp-dev \
+            libmpfr-dev \
+            libmpc-dev \
+            libisl-dev \
+            zlib1g-dev \
+            wget \
+            xz-utils
+
+      - name: Clone toolchain source
+        run: |
+          VERSION="${{ env.TOOLCHAIN_VERSION }}"
+          echo "Cloning tag: $VERSION"
+          git clone --depth 1 --branch "$VERSION" https://github.com/XUANTIE-RV/xuantie-gnu-toolchain.git xuantie-gnu-toolchain
+
+      - name: Configure toolchain
+        run: |
+          cd xuantie-gnu-toolchain
+          ./configure --prefix=${{ github.workspace }}/install/${{ matrix.arch }} --enable-multilib
+
+      - name: Build toolchain
+        run: |
+          cd xuantie-gnu-toolchain
+          make -j $(nproc)
+
+      - name: Install toolchain
+        run: |
+          cd xuantie-gnu-toolchain
+          make install
+
+      - name: Prepare highly compressed artifact
+        run: |
+          # Create a highly compressed archive of the installed toolchain using gzip -9
+          cd ${{ github.workspace }}/install/${{ matrix.arch }}
+          tar -cf - . | gzip -9 > ${{ github.workspace }}/${{ matrix.artifact-name }}.tar.gz
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: ${{ github.workspace }}/${{ matrix.artifact-name }}.tar.gz
+          retention-days: 7
+
+  release:
+    name: Create Release
+    needs: build
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artefacts
+        uses: actions/download-artifact@v7
+        with:
+          path: ${{ github.workspace }}/artefacts
+          pattern: toolchain-*
+          merge-multiple: false
+
+      - name: Verify artefacts were built and pulled
+        run: |
+          ls -la ${{ github.workspace }}/artefacts/
+          test -f ${{ github.workspace }}/artefacts/toolchain-x86_64/toolchain-x86_64.tar.gz
+          test -f ${{ github.workspace }}/artefacts/toolchain-aarch64/toolchain-aarch64.tar.gz
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Xuantie GNU Toolchain ${{ env.TOOLCHAIN_VERSION }} (Multi-arch)
+          body: |
+            Pre-built Xuantie GNU Toolchain ${{ env.TOOLCHAIN_VERSION }} for multiple architectures.
+
+            ## Contents
+            - `toolchain-x86_64.tar.gz` - Toolchain built on x86_64 (highly compressed)
+            - `toolchain-aarch64.tar.gz` - Toolchain built on aarch64 (highly compressed)
+
+            ## Installation
+            ```bash
+            # Extract x86_64 toolchain
+            tar -xzf toolchain-x86_64.tar.gz
+            export PATH=$PWD/bin:$PATH
+
+            # Extract aarch64 toolchain
+            tar -xzf toolchain-aarch64.tar.gz
+            export PATH=$PWD/bin:$PATH
+            ```
+          files: |
+            ${{ github.workspace }}/artefacts/toolchain-x86_64/toolchain-x86_64.tar.gz
+            ${{ github.workspace }}/artefacts/toolchain-aarch64/toolchain-aarch64.tar.gz
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
